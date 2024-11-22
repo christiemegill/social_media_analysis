@@ -44,7 +44,7 @@ pip install -r requirements.txt
    - 04_visualization_dashboard.ipynb: Creating visualizations
 
 ## Key Findings
-[You'll add your key findings here as you complete the analysis]
+[Key findings here]
 
 ## Future Improvements
-[Add potential extensions or improvements to your analysis]
+[Potential extensions or improvements to analysis]

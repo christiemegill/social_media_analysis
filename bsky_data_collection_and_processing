@@ -1,140 +1,153 @@
-import json
-from datetime import datetime, timedelta
+from atproto import Client
 import pandas as pd
-import emoji
-import re
+from datetime import datetime, timedelta
+import json
+import time
 
 class BlueskyDataCollector:
     def __init__(self):
-        self.raw_data = []
+        self.client = Client()
+        self.posts_data = []
         
-    def add_post(self, post_data):
+    def login(self, email, password):
+        """Login to Bluesky"""
+        profile = self.client.login(email, password)
+        print(f"Logged in as {profile.handle}")
+        
+    def collect_user_data(self, handle, limit=100):
         """
-        Add a single post's data to the collection with enhanced metrics.
+        Collect posts and engagement data for a specific user
         
         Parameters:
-        post_data (dict): Dictionary containing post information with:
-            Required fields:
-            - text: Post content
-            - timestamp: Post creation time (ISO format)
-            - likes: Number of likes
-            - reposts: Number of reposts
-            - replies: Number of replies
-            
-            Optional fields:
-            - has_media: Boolean indicating if post contains media
-            - media_type: Type of media ('image', 'link', 'quote', None)
-            - language: Detected language of the post
-            - is_reply: Boolean indicating if post is a reply
-            - mentions_count: Number of @mentions in post
-            - links_count: Number of links in post
+        handle (str): User handle (e.g., 'bsky.app')
+        limit (int): Maximum number of posts to collect
         """
-        # Add collection timestamp
-        post_data['collected_at'] = datetime.now().isoformat()
+        try:
+            print(f"\nCollecting data for @{handle}...")
+            profile = self.client.get_profile(actor=handle)
+            
+            cursor = None
+            posts_collected = 0
+            
+            while posts_collected < limit:
+                # Fetch posts
+                response = self.client.get_author_feed(
+                    actor=handle,
+                    cursor=cursor,
+                    limit=min(100, limit - posts_collected)
+                )
+                
+                for post in response.feed:
+                    # Extract post data
+                    post_data = {
+                        'author': handle,
+                        'text': post.post.text,
+                        'timestamp': post.post.indexed_at,
+                        'likes': post.post.like_count,
+                        'reposts': post.post.repost_count,
+                        'replies': post.post.reply_count,
+                        'has_media': bool(post.post.embed),
+                        'media_type': self._get_media_type(post.post.embed),
+                        'is_reply': bool(post.post.reply),
+                        'word_count': len(post.post.text.split()),
+                        'character_count': len(post.post.text),
+                        'mentions_count': len([f for f in (post.post.facets or []) 
+                                            if hasattr(f, 'features') and any(feat.did for feat in f.features)]),
+                        'urls_count': len([f for f in (post.post.facets or []) 
+                                         if hasattr(f, 'features') and any(feat.uri for feat in f.features)])
+                    }
+                    
+                    # Add time-based features
+                    post_time = datetime.fromisoformat(post_data['timestamp'].replace('Z', '+00:00'))
+                    post_data['hour_of_day'] = post_time.hour
+                    post_data['day_of_week'] = post_time.strftime('%A')
+                    post_data['is_weekend'] = post_time.weekday() >= 5
+                    
+                    self.posts_data.append(post_data)
+                    posts_collected += 1
+                    
+                    # Progress update
+                    if posts_collected % 10 == 0:
+                        print(f"Collected {posts_collected} posts...")
+                
+                if not response.cursor or posts_collected >= limit:
+                    break
+                    
+                cursor = response.cursor
+                time.sleep(0.5)  # Rate limiting
+                
+            print(f"Successfully collected {posts_collected} posts for @{handle}")
+            
+        except Exception as e:
+            print(f"Error collecting data for {handle}: {str(e)}")
+    
+    def _get_media_type(self, embed):
+        """Determine the type of media in the post"""
+        if not embed:
+            return None
         
-        # Extract additional metrics
-        text = post_data['text']
-        
-        # Count emojis
-        post_data['emoji_count'] = len([c for c in text if c in emoji.EMOJI_DATA])
-        
-        # Count hashtags
-        post_data['hashtag_count'] = len(re.findall(r'#\w+', text))
-        
-        # Calculate engagement rate (likes + reposts + replies / total possible interactions)
-        post_data['engagement_rate'] = (
-            (post_data['likes'] + post_data['reposts'] + post_data['replies']) / 100
-        )
-        
-        # Analyze text characteristics
-        post_data['words_count'] = len(text.split())
-        post_data['chars_count'] = len(text)
-        post_data['avg_word_length'] = post_data['chars_count'] / post_data['words_count'] if post_data['words_count'] > 0 else 0
-        
-        # Time-based features
-        post_datetime = datetime.fromisoformat(post_data['timestamp'].replace('Z', '+00:00'))
-        post_data['hour_of_day'] = post_datetime.hour
-        post_data['day_of_week'] = post_datetime.strftime('%A')
-        post_data['is_weekend'] = post_datetime.weekday() >= 5
-        
-        # Virality metrics
-        post_data['virality_ratio'] = post_data['reposts'] / post_data['likes'] if post_data['likes'] > 0 else 0
-        post_data['conversation_ratio'] = post_data['replies'] / (post_data['likes'] + post_data['reposts']) if (post_data['likes'] + post_data['reposts']) > 0 else 0
-        
-        self.raw_data.append(post_data)
-        
-    def save_raw_data(self, filename):
-        """Save raw data to JSON file."""
+        embed_type = type(embed).__name__
+        if 'Images' in embed_type:
+            return 'image'
+        elif 'Record' in embed_type:
+            return 'quote'
+        elif 'External' in embed_type:
+            return 'link'
+        return 'other'
+    
+    def save_to_json(self, filename='bluesky_data.json'):
+        """Save collected data to JSON file"""
         with open(filename, 'w') as f:
-            json.dump(self.raw_data, f, indent=2)
-            
-    def load_raw_data(self, filename):
-        """Load raw data from JSON file."""
-        with open(filename, 'r') as f:
-            self.raw_data = json.load(f)
-            
-    def create_analysis_dataframe(self):
-        """Convert raw data to pandas DataFrame with enhanced analysis features."""
-        df = pd.DataFrame(self.raw_data)
+            json.dump(self.posts_data, f, indent=2)
+        print(f"\nData saved to {filename}")
+    
+    def save_to_csv(self, filename='bluesky_data.csv'):
+        """Save collected data to CSV file"""
+        df = pd.DataFrame(self.posts_data)
+        df.to_csv(filename, index=False)
+        print(f"\nData saved to {filename}")
+    
+    def get_basic_stats(self):
+        """Calculate and print basic statistics about the collected data"""
+        df = pd.DataFrame(self.posts_data)
         
-        # Convert timestamps to datetime
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['collected_at'] = pd.to_datetime(df['collected_at'])
-        
-        # Time windows for temporal analysis
-        df['hour_bucket'] = pd.cut(df['hour_of_day'], 
-                                 bins=[0, 6, 12, 18, 24], 
-                                 labels=['Night', 'Morning', 'Afternoon', 'Evening'])
-        
-        # Engagement buckets
-        df['engagement_level'] = pd.qcut(df['engagement_rate'], 
-                                       q=4, 
-                                       labels=['Low', 'Medium', 'High', 'Viral'])
-        
-        # Content type categorization
-        df['content_type'] = 'text_only'
-        df.loc[df['media_type'].notna(), 'content_type'] = df['media_type']
-        df.loc[df['links_count'] > 0, 'content_type'] = 'link'
-        
-        return df
-
-    def generate_summary_stats(self, df):
-        """Generate summary statistics for the collected data."""
         stats = {
-            'total_posts': len(df),
-            'total_engagement': df['likes'].sum() + df['reposts'].sum() + df['replies'].sum(),
-            'avg_engagement_rate': df['engagement_rate'].mean(),
-            'most_active_hour': df['hour_of_day'].mode().iloc[0],
-            'most_engaging_content_type': df.groupby('content_type')['engagement_rate'].mean().idxmax(),
-            'emoji_usage_rate': (df['emoji_count'] > 0).mean(),
-            'avg_post_length': df['chars_count'].mean(),
-            'viral_post_count': len(df[df['engagement_level'] == 'Viral']),
-            'weekend_engagement_ratio': df[df['is_weekend']]['engagement_rate'].mean() / 
-                                      df[~df['is_weekend']]['engagement_rate'].mean()
+            'Total Posts': len(df),
+            'Date Range': f"{df['timestamp'].min()} to {df['timestamp'].max()}",
+            'Average Likes': df['likes'].mean(),
+            'Average Reposts': df['reposts'].mean(),
+            'Average Replies': df['replies'].mean(),
+            'Posts with Media': df['has_media'].sum(),
+            'Most Active Day': df['day_of_week'].mode().iloc[0],
+            'Most Active Hour': df['hour_of_day'].mode().iloc[0]
         }
-        return stats
+        
+        print("\nBasic Statistics:")
+        for key, value in stats.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.2f}")
+            else:
+                print(f"{key}: {value}")
 
-# Example usage:
-collector = BlueskyDataCollector()
-
-# Example post data
-example_post = {
-    "text": "Welcome to Bluesky! 🚀 Check out our latest update #bluesky",
-    "timestamp": "2024-11-24T12:00:00Z",
-    "likes": 150,
-    "reposts": 25,
-    "replies": 30,
-    "has_media": False,
-    "media_type": None,
-    "language": "en",
-    "is_reply": False,
-    "mentions_count": 0,
-    "links_count": 0
-}
-
-collector.add_post(example_post)
-collector.save_raw_data('bluesky_data.json')
-
-# Create analysis DataFrame
-df = collector.create_analysis_dataframe()
-stats = collector.generate_summary_stats(df)
+# Example usage
+if __name__ == "__main__":
+    collector = BlueskyDataCollector()
+    
+    # Get credentials
+    email = input("Enter your Bluesky email: ")
+    password = input("Enter your Bluesky password: ")
+    
+    # Login
+    collector.login(email, password)
+    
+    # Collect data for specific accounts
+    accounts = ['bsky.app', 'jay.bsky.team', 'emilyliu.me']
+    for account in accounts:
+        collector.collect_user_data(account, limit=100)
+    
+    # Save data
+    collector.save_to_json()
+    collector.save_to_csv()
+    
+    # Show basic stats
+    collector.get_basic_stats()

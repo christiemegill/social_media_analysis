@@ -15,13 +15,7 @@ class BlueskyDataCollector:
         print(f"Logged in as {profile.handle}")
         
     def collect_user_data(self, handle, limit=100):
-        """
-        Collect posts and engagement data for a specific user
-        
-        Parameters:
-        handle (str): User handle (e.g., 'bsky.app')
-        limit (int): Maximum number of posts to collect
-        """
+        """Collect posts and engagement data for a specific user"""
         try:
             print(f"\nCollecting data for @{handle}...")
             profile = self.client.get_profile(actor=handle)
@@ -30,52 +24,55 @@ class BlueskyDataCollector:
             posts_collected = 0
             
             while posts_collected < limit:
-                # Fetch posts
-                response = self.client.get_author_feed(
-                    actor=handle,
-                    cursor=cursor,
-                    limit=min(100, limit - posts_collected)
-                )
-                
-                for post in response.feed:
-                    # Extract post data
-                    post_data = {
-                        'author': handle,
-                        'text': post.post.text,
-                        'timestamp': post.post.indexed_at,
-                        'likes': post.post.like_count,
-                        'reposts': post.post.repost_count,
-                        'replies': post.post.reply_count,
-                        'has_media': bool(post.post.embed),
-                        'media_type': self._get_media_type(post.post.embed),
-                        'is_reply': bool(post.post.reply),
-                        'word_count': len(post.post.text.split()),
-                        'character_count': len(post.post.text),
-                        'mentions_count': len([f for f in (post.post.facets or []) 
-                                            if hasattr(f, 'features') and any(feat.did for feat in f.features)]),
-                        'urls_count': len([f for f in (post.post.facets or []) 
-                                         if hasattr(f, 'features') and any(feat.uri for feat in f.features)])
-                    }
+                try:
+                    # Fetch posts
+                    response = self.client.get_author_feed(
+                        actor=handle,
+                        cursor=cursor,
+                        limit=min(100, limit - posts_collected)
+                    )
                     
-                    # Add time-based features
-                    post_time = datetime.fromisoformat(post_data['timestamp'].replace('Z', '+00:00'))
-                    post_data['hour_of_day'] = post_time.hour
-                    post_data['day_of_week'] = post_time.strftime('%A')
-                    post_data['is_weekend'] = post_time.weekday() >= 5
+                    for post in response.feed:
+                        try:
+                            # Extract post data with error handling
+                            post_data = {
+                                'author': handle,
+                                'text': getattr(post.post, 'text', ''),
+                                'created_at': getattr(post.post, 'created_at', None),
+                                'likes': getattr(post.post, 'like_count', 0),
+                                'reposts': getattr(post.post, 'repost_count', 0),
+                                'replies': getattr(post.post, 'reply_count', 0),
+                                'has_media': bool(getattr(post.post, 'embed', None)),
+                                'media_type': self._get_media_type(getattr(post.post, 'embed', None)),
+                                'is_reply': bool(getattr(post.post, 'reply', None)),
+                                'word_count': len(getattr(post.post, 'text', '').split()),
+                                'character_count': len(getattr(post.post, 'text', '')),
+                            }
+                            
+                            # Add time-based features
+                            if post_data['created_at']:
+                                post_time = datetime.fromisoformat(post_data['created_at'].replace('Z', '+00:00'))
+                                post_data['hour_of_day'] = post_time.hour
+                                post_data['day_of_week'] = post_time.strftime('%A')
+                                post_data['is_weekend'] = post_time.weekday() >= 5
+                            
+                            self.posts_data.append(post_data)
+                            posts_collected += 1
+                            
+                        except Exception as e:
+                            print(f"Error processing post: {str(e)}")
+                            continue
                     
-                    self.posts_data.append(post_data)
-                    posts_collected += 1
+                    if not response.cursor or posts_collected >= limit:
+                        break
+                        
+                    cursor = response.cursor
+                    time.sleep(0.5)  # Rate limiting
                     
-                    # Progress update
-                    if posts_collected % 10 == 0:
-                        print(f"Collected {posts_collected} posts...")
-                
-                if not response.cursor or posts_collected >= limit:
+                except Exception as e:
+                    print(f"Error fetching page: {str(e)}")
                     break
                     
-                cursor = response.cursor
-                time.sleep(0.5)  # Rate limiting
-                
             print(f"Successfully collected {posts_collected} posts for @{handle}")
             
         except Exception as e:
@@ -86,14 +83,23 @@ class BlueskyDataCollector:
         if not embed:
             return None
         
-        embed_type = type(embed).__name__
-        if 'Images' in embed_type:
-            return 'image'
-        elif 'Record' in embed_type:
-            return 'quote'
-        elif 'External' in embed_type:
-            return 'link'
-        return 'other'
+        try:
+            embed_type = getattr(embed, '$type', None)
+            if not embed_type and hasattr(embed, 'type'):
+                embed_type = embed.type
+                
+            if 'video' in str(embed_type).lower():
+                return 'video'
+            elif 'image' in str(embed_type).lower():
+                return 'image'
+            elif 'record' in str(embed_type).lower():
+                return 'quote'
+            elif 'external' in str(embed_type).lower():
+                return 'link'
+            return 'other'
+            
+        except Exception:
+            return 'unknown'
     
     def save_to_json(self, filename='bluesky_data.json'):
         """Save collected data to JSON file"""
@@ -109,17 +115,22 @@ class BlueskyDataCollector:
     
     def get_basic_stats(self):
         """Calculate and print basic statistics about the collected data"""
+        if not self.posts_data:
+            print("No data collected yet!")
+            return
+            
         df = pd.DataFrame(self.posts_data)
         
         stats = {
             'Total Posts': len(df),
-            'Date Range': f"{df['timestamp'].min()} to {df['timestamp'].max()}",
+            'Date Range': f"{df['created_at'].min()} to {df['created_at'].max()}" if 'created_at' in df.columns else "N/A",
             'Average Likes': df['likes'].mean(),
             'Average Reposts': df['reposts'].mean(),
             'Average Replies': df['replies'].mean(),
             'Posts with Media': df['has_media'].sum(),
-            'Most Active Day': df['day_of_week'].mode().iloc[0],
-            'Most Active Hour': df['hour_of_day'].mode().iloc[0]
+            'Most Common Media Type': df['media_type'].mode().iloc[0] if not df['media_type'].isna().all() else "None",
+            'Most Active Day': df['day_of_week'].mode().iloc[0] if 'day_of_week' in df.columns else "N/A",
+            'Most Active Hour': df['hour_of_day'].mode().iloc[0] if 'hour_of_day' in df.columns else "N/A"
         }
         
         print("\nBasic Statistics:")
@@ -129,7 +140,6 @@ class BlueskyDataCollector:
             else:
                 print(f"{key}: {value}")
 
-# Example usage
 if __name__ == "__main__":
     collector = BlueskyDataCollector()
     

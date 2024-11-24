@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta
 import pandas as pd
+import emoji
+import re
 
 class BlueskyDataCollector:
     def __init__(self):
@@ -8,19 +10,57 @@ class BlueskyDataCollector:
         
     def add_post(self, post_data):
         """
-        Add a single post's data to the collection.
+        Add a single post's data to the collection with enhanced metrics.
         
         Parameters:
-        post_data (dict): Dictionary containing post information with the following keys:
+        post_data (dict): Dictionary containing post information with:
+            Required fields:
             - text: Post content
             - timestamp: Post creation time (ISO format)
             - likes: Number of likes
             - reposts: Number of reposts
             - replies: Number of replies
+            
+            Optional fields:
             - has_media: Boolean indicating if post contains media
+            - media_type: Type of media ('image', 'link', 'quote', None)
+            - language: Detected language of the post
+            - is_reply: Boolean indicating if post is a reply
+            - mentions_count: Number of @mentions in post
+            - links_count: Number of links in post
         """
         # Add collection timestamp
         post_data['collected_at'] = datetime.now().isoformat()
+        
+        # Extract additional metrics
+        text = post_data['text']
+        
+        # Count emojis
+        post_data['emoji_count'] = len([c for c in text if c in emoji.EMOJI_DATA])
+        
+        # Count hashtags
+        post_data['hashtag_count'] = len(re.findall(r'#\w+', text))
+        
+        # Calculate engagement rate (likes + reposts + replies / total possible interactions)
+        post_data['engagement_rate'] = (
+            (post_data['likes'] + post_data['reposts'] + post_data['replies']) / 100
+        )
+        
+        # Analyze text characteristics
+        post_data['words_count'] = len(text.split())
+        post_data['chars_count'] = len(text)
+        post_data['avg_word_length'] = post_data['chars_count'] / post_data['words_count'] if post_data['words_count'] > 0 else 0
+        
+        # Time-based features
+        post_datetime = datetime.fromisoformat(post_data['timestamp'].replace('Z', '+00:00'))
+        post_data['hour_of_day'] = post_datetime.hour
+        post_data['day_of_week'] = post_datetime.strftime('%A')
+        post_data['is_weekend'] = post_datetime.weekday() >= 5
+        
+        # Virality metrics
+        post_data['virality_ratio'] = post_data['reposts'] / post_data['likes'] if post_data['likes'] > 0 else 0
+        post_data['conversation_ratio'] = post_data['replies'] / (post_data['likes'] + post_data['reposts']) if (post_data['likes'] + post_data['reposts']) > 0 else 0
+        
         self.raw_data.append(post_data)
         
     def save_raw_data(self, filename):
@@ -34,32 +74,62 @@ class BlueskyDataCollector:
             self.raw_data = json.load(f)
             
     def create_analysis_dataframe(self):
-        """Convert raw data to pandas DataFrame for analysis."""
+        """Convert raw data to pandas DataFrame with enhanced analysis features."""
         df = pd.DataFrame(self.raw_data)
         
         # Convert timestamps to datetime
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['collected_at'] = pd.to_datetime(df['collected_at'])
         
-        # Add derived features
-        df['post_length'] = df['text'].str.len()
-        df['hour_of_day'] = df['timestamp'].dt.hour
-        df['day_of_week'] = df['timestamp'].dt.day_name()
-        df['total_engagement'] = df['likes'] + df['reposts'] + df['replies']
+        # Time windows for temporal analysis
+        df['hour_bucket'] = pd.cut(df['hour_of_day'], 
+                                 bins=[0, 6, 12, 18, 24], 
+                                 labels=['Night', 'Morning', 'Afternoon', 'Evening'])
+        
+        # Engagement buckets
+        df['engagement_level'] = pd.qcut(df['engagement_rate'], 
+                                       q=4, 
+                                       labels=['Low', 'Medium', 'High', 'Viral'])
+        
+        # Content type categorization
+        df['content_type'] = 'text_only'
+        df.loc[df['media_type'].notna(), 'content_type'] = df['media_type']
+        df.loc[df['links_count'] > 0, 'content_type'] = 'link'
         
         return df
+
+    def generate_summary_stats(self, df):
+        """Generate summary statistics for the collected data."""
+        stats = {
+            'total_posts': len(df),
+            'total_engagement': df['likes'].sum() + df['reposts'].sum() + df['replies'].sum(),
+            'avg_engagement_rate': df['engagement_rate'].mean(),
+            'most_active_hour': df['hour_of_day'].mode().iloc[0],
+            'most_engaging_content_type': df.groupby('content_type')['engagement_rate'].mean().idxmax(),
+            'emoji_usage_rate': (df['emoji_count'] > 0).mean(),
+            'avg_post_length': df['chars_count'].mean(),
+            'viral_post_count': len(df[df['engagement_level'] == 'Viral']),
+            'weekend_engagement_ratio': df[df['is_weekend']]['engagement_rate'].mean() / 
+                                      df[~df['is_weekend']]['engagement_rate'].mean()
+        }
+        return stats
 
 # Example usage:
 collector = BlueskyDataCollector()
 
-# Example post data structure
+# Example post data
 example_post = {
-    "text": "Welcome to Bluesky!",
+    "text": "Welcome to Bluesky! 🚀 Check out our latest update #bluesky",
     "timestamp": "2024-11-24T12:00:00Z",
     "likes": 150,
     "reposts": 25,
     "replies": 30,
-    "has_media": False
+    "has_media": False,
+    "media_type": None,
+    "language": "en",
+    "is_reply": False,
+    "mentions_count": 0,
+    "links_count": 0
 }
 
 collector.add_post(example_post)
@@ -67,3 +137,4 @@ collector.save_raw_data('bluesky_data.json')
 
 # Create analysis DataFrame
 df = collector.create_analysis_dataframe()
+stats = collector.generate_summary_stats(df)

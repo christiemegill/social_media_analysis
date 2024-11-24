@@ -1,0 +1,69 @@
+import json
+from datetime import datetime, timedelta
+import pandas as pd
+
+class BlueskyDataCollector:
+    def __init__(self):
+        self.raw_data = []
+        
+    def add_post(self, post_data):
+        """
+        Add a single post's data to the collection.
+        
+        Parameters:
+        post_data (dict): Dictionary containing post information with the following keys:
+            - text: Post content
+            - timestamp: Post creation time (ISO format)
+            - likes: Number of likes
+            - reposts: Number of reposts
+            - replies: Number of replies
+            - has_media: Boolean indicating if post contains media
+        """
+        # Add collection timestamp
+        post_data['collected_at'] = datetime.now().isoformat()
+        self.raw_data.append(post_data)
+        
+    def save_raw_data(self, filename):
+        """Save raw data to JSON file."""
+        with open(filename, 'w') as f:
+            json.dump(self.raw_data, f, indent=2)
+            
+    def load_raw_data(self, filename):
+        """Load raw data from JSON file."""
+        with open(filename, 'r') as f:
+            self.raw_data = json.load(f)
+            
+    def create_analysis_dataframe(self):
+        """Convert raw data to pandas DataFrame for analysis."""
+        df = pd.DataFrame(self.raw_data)
+        
+        # Convert timestamps to datetime
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['collected_at'] = pd.to_datetime(df['collected_at'])
+        
+        # Add derived features
+        df['post_length'] = df['text'].str.len()
+        df['hour_of_day'] = df['timestamp'].dt.hour
+        df['day_of_week'] = df['timestamp'].dt.day_name()
+        df['total_engagement'] = df['likes'] + df['reposts'] + df['replies']
+        
+        return df
+
+# Example usage:
+collector = BlueskyDataCollector()
+
+# Example post data structure
+example_post = {
+    "text": "Welcome to Bluesky!",
+    "timestamp": "2024-11-24T12:00:00Z",
+    "likes": 150,
+    "reposts": 25,
+    "replies": 30,
+    "has_media": False
+}
+
+collector.add_post(example_post)
+collector.save_raw_data('bluesky_data.json')
+
+# Create analysis DataFrame
+df = collector.create_analysis_dataframe()

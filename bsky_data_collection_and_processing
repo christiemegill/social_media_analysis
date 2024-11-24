@@ -1,118 +1,152 @@
-from atproto import Client
-import pandas as pd
-from datetime import datetime, timedelta
+import requests
 import json
+import pandas as pd
+from datetime import datetime
 import time
 
-class BlueskyDataCollector:
+class BlueskyDirectCollector:
     def __init__(self):
-        self.client = Client()
+        self.session = requests.Session()
         self.posts_data = []
+        self.base_url = "https://bsky.social/xrpc"
         
     def login(self, email, password):
-        """Login to Bluesky"""
-        profile = self.client.login(email, password)
-        print(f"Logged in as {profile.handle}")
+        """Login to Bluesky using direct API"""
+        auth_response = self.session.post(
+            f"{self.base_url}/com.atproto.server.createSession",
+            json={"identifier": email, "password": password}
+        )
         
-    def collect_user_data(self, handle, limit=100):
-        """Collect posts and engagement data for a specific user"""
-        try:
-            print(f"\nCollecting data for @{handle}...")
-            profile = self.client.get_profile(actor=handle)
+        if auth_response.status_code == 200:
+            auth_data = auth_response.json()
+            self.session.headers.update({
+                "Authorization": f"Bearer {auth_data['accessJwt']}"
+            })
+            print(f"Logged in as {auth_data['handle']}")
+            return True
+        else:
+            print(f"Login failed: {auth_response.text}")
+            return False
             
+    def collect_user_data(self, handle, limit=100):
+        """Collect posts from a user using direct API calls"""
+        print(f"\nCollecting data for @{handle}...")
+        
+        try:
+            # First get the DID for the handle
+            profile_response = self.session.get(
+                f"{self.base_url}/com.atproto.identity.resolveHandle",
+                params={"handle": handle}
+            )
+            
+            if profile_response.status_code != 200:
+                print(f"Error resolving handle: {profile_response.text}")
+                return
+                
+            did = profile_response.json()["did"]
+            
+            # Now fetch the posts
             cursor = None
             posts_collected = 0
             
             while posts_collected < limit:
-                try:
-                    # Fetch posts
-                    response = self.client.get_author_feed(
-                        actor=handle,
-                        cursor=cursor,
-                        limit=min(100, limit - posts_collected)
-                    )
+                params = {
+                    "actor": did,
+                    "limit": min(100, limit - posts_collected)
+                }
+                if cursor:
+                    params["cursor"] = cursor
                     
-                    for post in response.feed:
-                        try:
-                            # Extract post data with error handling
-                            post_data = {
-                                'author': handle,
-                                'text': getattr(post.post, 'text', ''),
-                                'created_at': getattr(post.post, 'created_at', None),
-                                'likes': getattr(post.post, 'like_count', 0),
-                                'reposts': getattr(post.post, 'repost_count', 0),
-                                'replies': getattr(post.post, 'reply_count', 0),
-                                'has_media': bool(getattr(post.post, 'embed', None)),
-                                'media_type': self._get_media_type(getattr(post.post, 'embed', None)),
-                                'is_reply': bool(getattr(post.post, 'reply', None)),
-                                'word_count': len(getattr(post.post, 'text', '').split()),
-                                'character_count': len(getattr(post.post, 'text', '')),
-                            }
-                            
-                            # Add time-based features
-                            if post_data['created_at']:
-                                post_time = datetime.fromisoformat(post_data['created_at'].replace('Z', '+00:00'))
-                                post_data['hour_of_day'] = post_time.hour
-                                post_data['day_of_week'] = post_time.strftime('%A')
-                                post_data['is_weekend'] = post_time.weekday() >= 5
-                            
-                            self.posts_data.append(post_data)
-                            posts_collected += 1
-                            
-                        except Exception as e:
-                            print(f"Error processing post: {str(e)}")
-                            continue
-                    
-                    if not response.cursor or posts_collected >= limit:
-                        break
-                        
-                    cursor = response.cursor
-                    time.sleep(0.5)  # Rate limiting
-                    
-                except Exception as e:
-                    print(f"Error fetching page: {str(e)}")
+                feed_response = self.session.get(
+                    f"{self.base_url}/app.bsky.feed.getAuthorFeed",
+                    params=params
+                )
+                
+                if feed_response.status_code != 200:
+                    print(f"Error fetching feed: {feed_response.text}")
                     break
                     
+                feed_data = feed_response.json()
+                
+                for post in feed_data.get("feed", []):
+                    try:
+                        post_record = post.get("post", {})
+                        post_data = {
+                            "author": handle,
+                            "text": post_record.get("record", {}).get("text", ""),
+                            "created_at": post_record.get("record", {}).get("createdAt"),
+                            "likes": post_record.get("likeCount", 0),
+                            "reposts": post_record.get("repostCount", 0),
+                            "replies": post_record.get("replyCount", 0),
+                            "indexed_at": post_record.get("indexedAt"),
+                            "has_media": bool(post_record.get("embed")),
+                            "media_type": self._get_media_type(post_record.get("embed", {})),
+                            "is_reply": bool(post_record.get("record", {}).get("reply")),
+                        }
+                        
+                        # Add time-based features
+                        if post_data["created_at"]:
+                            post_time = datetime.fromisoformat(post_data["created_at"].replace("Z", "+00:00"))
+                            post_data["hour_of_day"] = post_time.hour
+                            post_data["day_of_week"] = post_time.strftime("%A")
+                            post_data["is_weekend"] = post_time.weekday() >= 5
+                            
+                        # Add text analysis
+                        text = post_data["text"]
+                        post_data["word_count"] = len(text.split())
+                        post_data["character_count"] = len(text)
+                        
+                        self.posts_data.append(post_data)
+                        posts_collected += 1
+                        
+                        if posts_collected % 10 == 0:
+                            print(f"Collected {posts_collected} posts...")
+                            
+                    except Exception as e:
+                        print(f"Error processing post: {str(e)}")
+                        continue
+                
+                cursor = feed_data.get("cursor")
+                if not cursor or posts_collected >= limit:
+                    break
+                    
+                time.sleep(0.5)  # Rate limiting
+                
             print(f"Successfully collected {posts_collected} posts for @{handle}")
             
         except Exception as e:
             print(f"Error collecting data for {handle}: {str(e)}")
-    
+            
     def _get_media_type(self, embed):
         """Determine the type of media in the post"""
         if not embed:
             return None
-        
-        try:
-            embed_type = getattr(embed, '$type', None)
-            if not embed_type and hasattr(embed, 'type'):
-                embed_type = embed.type
-                
-            if 'video' in str(embed_type).lower():
-                return 'video'
-            elif 'image' in str(embed_type).lower():
-                return 'image'
-            elif 'record' in str(embed_type).lower():
-                return 'quote'
-            elif 'external' in str(embed_type).lower():
-                return 'link'
-            return 'other'
             
-        except Exception:
-            return 'unknown'
-    
-    def save_to_json(self, filename='bluesky_data.json'):
+        embed_type = embed.get("$type", "")
+        
+        if "video" in embed_type.lower():
+            return "video"
+        elif "image" in embed_type.lower():
+            return "image"
+        elif "record" in embed_type.lower():
+            return "quote"
+        elif "external" in embed_type.lower():
+            return "link"
+        return "other"
+        
+    def save_to_json(self, filename="bluesky_data.json"):
         """Save collected data to JSON file"""
-        with open(filename, 'w') as f:
+        with open(filename, "w") as f:
             json.dump(self.posts_data, f, indent=2)
         print(f"\nData saved to {filename}")
-    
-    def save_to_csv(self, filename='bluesky_data.csv'):
+        
+    def save_to_csv(self, filename="bluesky_data.csv"):
         """Save collected data to CSV file"""
-        df = pd.DataFrame(self.posts_data)
-        df.to_csv(filename, index=False)
-        print(f"\nData saved to {filename}")
-    
+        if self.posts_data:
+            df = pd.DataFrame(self.posts_data)
+            df.to_csv(filename, index=False)
+            print(f"\nData saved to {filename}")
+            
     def get_basic_stats(self):
         """Calculate and print basic statistics about the collected data"""
         if not self.posts_data:
@@ -122,15 +156,16 @@ class BlueskyDataCollector:
         df = pd.DataFrame(self.posts_data)
         
         stats = {
-            'Total Posts': len(df),
-            'Date Range': f"{df['created_at'].min()} to {df['created_at'].max()}" if 'created_at' in df.columns else "N/A",
-            'Average Likes': df['likes'].mean(),
-            'Average Reposts': df['reposts'].mean(),
-            'Average Replies': df['replies'].mean(),
-            'Posts with Media': df['has_media'].sum(),
-            'Most Common Media Type': df['media_type'].mode().iloc[0] if not df['media_type'].isna().all() else "None",
-            'Most Active Day': df['day_of_week'].mode().iloc[0] if 'day_of_week' in df.columns else "N/A",
-            'Most Active Hour': df['hour_of_day'].mode().iloc[0] if 'hour_of_day' in df.columns else "N/A"
+            "Total Posts": len(df),
+            "Date Range": f"{df['created_at'].min()} to {df['created_at'].max()}",
+            "Average Likes": df["likes"].mean(),
+            "Average Reposts": df["reposts"].mean(),
+            "Average Replies": df["replies"].mean(),
+            "Posts with Media": df["has_media"].sum(),
+            "Most Common Media Type": df["media_type"].mode().iloc[0] if not df["media_type"].isna().all() else "None",
+            "Most Active Day": df["day_of_week"].mode().iloc[0] if "day_of_week" in df.columns else "N/A",
+            "Most Active Hour": df["hour_of_day"].mode().iloc[0] if "hour_of_day" in df.columns else "N/A",
+            "Average Word Count": df["word_count"].mean()
         }
         
         print("\nBasic Statistics:")
@@ -141,23 +176,24 @@ class BlueskyDataCollector:
                 print(f"{key}: {value}")
 
 if __name__ == "__main__":
-    collector = BlueskyDataCollector()
+    collector = BlueskyDirectCollector()
     
     # Get credentials
     email = input("Enter your Bluesky email: ")
     password = input("Enter your Bluesky password: ")
     
     # Login
-    collector.login(email, password)
-    
-    # Collect data for specific accounts
-    accounts = ['bsky.app', 'jay.bsky.team', 'emilyliu.me']
-    for account in accounts:
-        collector.collect_user_data(account, limit=100)
-    
-    # Save data
-    collector.save_to_json()
-    collector.save_to_csv()
-    
-    # Show basic stats
-    collector.get_basic_stats()
+    if collector.login(email, password):
+        # Collect data for specific accounts
+        accounts = ["bsky.app", "jay.bsky.team", "emilyliu.me"]
+        for account in accounts:
+            collector.collect_user_data(account, limit=100)
+        
+        # Save data
+        collector.save_to_json()
+        collector.save_to_csv()
+        
+        # Show basic stats
+        collector.get_basic_stats()
+    else:
+        print("Failed to login. Please check your credentials.")

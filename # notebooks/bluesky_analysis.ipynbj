@@ -1,0 +1,43 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Bluesky Data Analysis\n",
+    "This notebook demonstrates how to use the BlueskyAnalyzer class for social media analysis."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "source": [
+    "import sys\n",
+    "sys.path.append('..')\n",
+    "from src.bluesky_analyzer import BlueskyAnalyzer\n",
+    "\n",
+    "# Initialize analyzer\n",
+    "analyzer = BlueskyAnalyzer('data/sample_data.json')\n",
+    "\n",
+    "# Get top performing posts\n",
+    "top_posts = analyzer.get_top_performing_posts()\n",
+    "print(\"Top Performing Posts:\")\n",
+    "display(top_posts)\n",
+    "\n",
+    "# Analyze posting patterns\n",
+    "patterns = analyzer.analyze_posting_patterns()\n",
+    "print(\"\\nPosting Patterns:\")\n",
+    "print(f\"Best hour to post: {patterns['best_posting_times']['hour']}:00\")\n",
+    "print(f\"Best day to post: {patterns['best_posting_times']['day']}\")\n",
+    "\n",
+    "# Plot engagement patterns\n",
+    "analyzer.plot_daily_engagement_patterns()\n",
+    "\n",
+    "# Export analysis\n",
+    "results = analyzer.export_analysis()\n",
+    "print(\"\\nAnalysis exported to 'analysis_results.json'\")"
+   ]
+  }
+ ]
+}

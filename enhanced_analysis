@@ -1,0 +1,105 @@
+# src/bluesky_analyzer.py
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import json
+import numpy as np
+
+class BlueskyAnalyzer:
+    def __init__(self, data_file='sample_data.json'):
+        """Initialize analyzer with Bluesky data"""
+        self.data_file = data_file
+        self.load_and_prepare_data()
+        
+    def load_and_prepare_data(self):
+        """Load and prepare the Bluesky data for analysis"""
+        # Load data
+        with open(self.data_file, 'r') as f:
+            self.raw_data = json.load(f)
+        self.df = pd.DataFrame(self.raw_data)
+        
+        # Convert timestamps
+        self.df['created_at'] = pd.to_datetime(self.df['created_at'])
+        
+        # Extract time-based features
+        self.df['hour'] = self.df['created_at'].dt.hour
+        self.df['day_of_week'] = self.df['created_at'].dt.day_name()
+        self.df['is_weekend'] = self.df['created_at'].dt.weekday.isin([5, 6])
+        
+        # Calculate basic metrics
+        self.calculate_engagement_metrics()
+    
+    def calculate_engagement_metrics(self):
+        """Calculate engagement metrics for each post"""
+        # Basic engagement metrics
+        self.df['total_engagement'] = (
+            self.df['likes'] + 
+            self.df['reposts'] * 2 +  # Weight reposts more
+            self.df['replies'] * 1.5   # Weight replies between likes and reposts
+        )
+        
+        # Engagement rate relative to author's average
+        author_avg = self.df.groupby('author')['total_engagement'].transform('mean')
+        self.df['engagement_rate'] = self.df['total_engagement'] / author_avg
+        
+        # Time performance metrics
+        hour_avg = self.df.groupby('hour')['total_engagement'].transform('mean')
+        self.df['time_performance'] = self.df['total_engagement'] / hour_avg
+    
+    def get_top_performing_posts(self, metric='total_engagement', n=5):
+        """Get top performing posts by specified metric"""
+        return self.df.nlargest(n, metric)[
+            ['created_at', 'author', 'text', metric, 'likes', 'reposts', 'replies']
+        ]
+    
+    def analyze_posting_patterns(self):
+        """Analyze posting patterns and return insights"""
+        patterns = {
+            'best_posting_times': {
+                'hour': int(self.df.groupby('hour')['engagement_rate'].mean().idxmax()),
+                'day': self.df.groupby('day_of_week')['engagement_rate'].mean().idxmax(),
+            },
+            'weekend_performance': {
+                'weekend_avg': float(self.df[self.df['is_weekend']]['engagement_rate'].mean()),
+                'weekday_avg': float(self.df[~self.df['is_weekend']]['engagement_rate'].mean())
+            }
+        }
+        return patterns
+    
+    def plot_daily_engagement_patterns(self):
+        """Plot engagement patterns by hour and day"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Hourly patterns
+        hourly = self.df.groupby('hour')['engagement_rate'].mean()
+        sns.lineplot(data=hourly, ax=ax1)
+        ax1.set_title('Average Engagement by Hour')
+        ax1.set_xlabel('Hour of Day')
+        
+        # Daily patterns
+        daily = self.df.groupby('day_of_week')['engagement_rate'].mean()
+        sns.barplot(x=daily.index, y=daily.values, ax=ax2)
+        ax2.set_title('Average Engagement by Day')
+        ax2.tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        return fig
+
+    def export_analysis(self, output_file='analysis_results.json'):
+        """Export key analysis results to JSON"""
+        results = {
+            'posting_patterns': self.analyze_posting_patterns(),
+            'top_posts': self.get_top_performing_posts().to_dict('records'),
+            'engagement_stats': {
+                'mean_engagement': float(self.df['total_engagement'].mean()),
+                'median_engagement': float(self.df['total_engagement'].median()),
+                'engagement_volatility': float(self.df['engagement_rate'].std())
+            }
+        }
+        
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        return results
